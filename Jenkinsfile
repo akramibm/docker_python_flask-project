@@ -6,6 +6,7 @@ node {
     def gitCredsId    = 'token123'
     def repoUrl       = 'https://github.com/akramibm/docker_python_flask-project.git'
 
+    
     try {
         stage('Ensure Docker Running') {
             echo 'Verifying Docker daemon connectivity...'
