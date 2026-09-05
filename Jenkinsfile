@@ -1,82 +1,84 @@
 node {
+    // Configuration Variables
     def imageName     = 'flask-app'
     def containerName = 'flask-app-service'
     def hostPort      = '5000'
+    def containerPort = '5000'
     def gitCredsId    = 'token123'
     def repoUrl       = 'https://github.com/akramibm/docker_python_flask-project.git'
 
     try {
-        stage('Install & Configure Docker') {
-            echo 'Ensuring Docker is installed and running on the host...'
+        stage('Ensure Docker Running') {
+            echo 'Starting Docker service and setting socket permissions...'
             sh '''
-                if ! command -v docker &> /dev/null; then
-                    echo "Docker not found. Installing docker.io..."
-                    sudo apt-get update -y
-                    sudo apt-get install -y docker.io
-                    sudo systemctl start docker
-                    sudo systemctl enable docker
-                else
-                    echo "Docker is already installed."
-                fi
-
-                # Ensure Docker daemon socket is writable by Jenkins
+                sudo systemctl start docker || true
+                sudo systemctl enable docker || true
                 sudo chmod 666 /var/run/docker.sock || true
+                
+                # Test connection to Docker daemon
+                docker info > /dev/null 2>&1 || {
+                    echo "ERROR: Cannot talk to Docker daemon after starting service."
+                    exit 1
+                }
             '''
         }
 
         stage('Checkout Code') {
-            echo "Checking out repo using credentials: ${gitCredsId}..."
+            echo "Checking out Flask repository using credentials: ${gitCredsId}..."
             git branch: 'main',
                 credentialsId: gitCredsId,
                 url: repoUrl
         }
 
         stage('Build Docker Image') {
-            echo 'Building Docker container image from Dockerfile...'
+            echo 'Building Docker container image...'
             sh "docker build -t ${imageName}:${BUILD_NUMBER} -t ${imageName}:latest ."
         }
 
         stage('Run App in Background') {
-            echo 'Launching Flask container in detached background mode (-d)...'
+            echo 'Cleaning up old container and starting new instance in detached mode...'
             sh """
-                # Clean existing container
+                # Stop and delete existing container if active
                 if [ \$(docker ps -aq -f name=^/${containerName}\$) ]; then
+                    echo "Removing existing container ${containerName}..."
                     docker stop ${containerName} || true
                     docker rm -f ${containerName} || true
                 fi
 
-                # Run detached in background
+                # Run container in background (-d)
                 docker run -d \\
                     --name ${containerName} \\
-                    -p ${hostPort}:5000 \\
+                    -p ${hostPort}:${containerPort} \\
                     --restart unless-stopped \\
                     ${imageName}:latest
 
+                # Confirm running status
                 docker ps -f name=^/${containerName}\$
             """
         }
 
         stage('Health Check') {
-            echo 'Testing Flask container background status...'
+            echo 'Verifying background service response...'
             sh """
                 sleep 5
-                curl -I -s --retry 3 --retry-delay 2 http://localhost:${hostPort}/ || {
-                    echo "Container failed to respond. Checking logs:"
+                curl -I -s --retry 5 --retry-delay 2 http://localhost:${hostPort}/ || {
+                    echo "Health check failed. Showing container logs:"
                     docker logs ${containerName}
                     exit 1
                 }
             """
         }
 
-        echo "Flask container is up and running in background on port ${hostPort}!"
+        echo "Flask container '${containerName}' is successfully running in background on port ${hostPort}."
 
     } catch (err) {
-        echo "Build failed: ${err.getMessage()}"
+        echo "Pipeline failed with error: ${err.getMessage()}"
         sh "docker logs ${containerName} || true"
         throw err
 
     } finally {
-        stage('Cleanup Workspace') {
+        stage('Workspace Cleanup') {
+            echo 'Cleaning Jenkins workspace while keeping background container active...'
             cleanWs()
         }
     }
