@@ -6,6 +6,24 @@ node {
     def repoUrl       = 'https://github.com/akramibm/docker_python_flask-project.git'
 
     try {
+        stage('Install & Configure Docker') {
+            echo 'Ensuring Docker is installed and running on the host...'
+            sh '''
+                if ! command -v docker &> /dev/null; then
+                    echo "Docker not found. Installing docker.io..."
+                    sudo apt-get update -y
+                    sudo apt-get install -y docker.io
+                    sudo systemctl start docker
+                    sudo systemctl enable docker
+                else
+                    echo "Docker is already installed."
+                fi
+
+                # Ensure Docker daemon socket is writable by Jenkins
+                sudo chmod 666 /var/run/docker.sock || true
+            '''
+        }
+
         stage('Checkout Code') {
             echo "Checking out repo using credentials: ${gitCredsId}..."
             git branch: 'main',
@@ -15,7 +33,6 @@ node {
 
         stage('Build Docker Image') {
             echo 'Building Docker container image from Dockerfile...'
-            // Uses your repo Dockerfile and requirements.txt
             sh "docker build -t ${imageName}:${BUILD_NUMBER} -t ${imageName}:latest ."
         }
 
