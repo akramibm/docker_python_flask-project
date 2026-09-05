@@ -1,45 +1,7 @@
-properties([
-    parameters([
-        choice(
-            name: 'ACTION',
-            choices: ['apply', 'destroy'],
-            description: 'Choose whether to provision or tear down the EC2 infrastructure'
-        )
-    ])
-])
-
-node {
-    def tfDir      = 'terraform'
-    def gitCredsId = 'token123'
-    def repoUrl    = 'https://github.com/akramibm/docker_python_flask-project.git'
-
-    try {
-        stage('Checkout Code') {
-            echo "Checking out repository..."
-            git branch: 'main',
-                credentialsId: gitCredsId,
-                url: repoUrl
-        }
-
-        stage('Install Terraform') {
-            echo 'Ensuring Terraform CLI is present...'
-            sh '''
-                if ! command -v terraform &> /dev/null; then
-                    echo "Installing Terraform CLI..."
-                    sudo apt-get update -y && sudo apt-get install -y gnupg software-properties-common curl
-                    curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-                    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-                    sudo apt-get update -y && sudo apt-get install -y terraform
-                else
-                    echo "Terraform already installed: $(terraform -version | head -n 1)"
-                fi
-            '''
-        }
-
-        stage('Generate Terraform Config') {
+stage('Generate Terraform Config') {
             echo 'Writing Terraform configuration file via writeFile...'
             sh "mkdir -p ${tfDir}"
-            
+
             writeFile file: "${tfDir}/main.tf", text: '''terraform {
   required_version = ">= 1.5.0"
   required_providers {
@@ -95,15 +57,24 @@ resource "aws_security_group" "flask_ec2_sg" {
 }
 
 resource "aws_instance" "flask_app_ec2" {
-  ami                    = "ami-02b64aa047cb5edf5"
-  instance_type          = "t2.micro"
-  vpc_security_group_ids = [aws_security_group.flask_ec2_sg.id]
+  ami                         = "ami-02b64aa047cb5edf5"
+  instance_type               = "t2.micro"
+  vpc_security_group_ids      = [aws_security_group.flask_ec2_sg.id]
+  iam_instance_profile        = "terraform_ec2"
+  user_data_replace_on_change = true
+
+  depends_on = [
+    aws_security_group.flask_ec2_sg
+  ]
 
   user_data = <<-USERDATA
               #!/bin/bash
-              export DEBIAN_FRONTEND=noninteractive
+              exec > /var/log/user-data.log 2>&1
+              set -e
 
-              # Update and install Docker and Nginx
+              export DEBIAN_FRONTEND=noninteractive
+              sed -i "s/#\\$nrconf{restart} = 'i';/\\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf 2>/dev/null || true
+
               apt-get update -y
               apt-get install -y -o Dpkg::Options::="--force-confold" docker.io nginx git curl
 
@@ -111,7 +82,6 @@ resource "aws_instance" "flask_app_ec2" {
               systemctl enable docker
               usermod -aG docker ubuntu
 
-              # Configure Nginx reverse proxy
               cat << 'NGINX_CONF' > /etc/nginx/sites-available/default
               server {
                   listen 80;
@@ -128,11 +98,10 @@ resource "aws_instance" "flask_app_ec2" {
               systemctl restart nginx
               systemctl enable nginx
 
-              # Clone repo and launch container
               cd /home/ubuntu
-              git clone https://github.com/akramibm/docker_python_flask-project.git app-repo
-              cd app-repo
-
+              rm -rf docker_python_flask-project
+              git clone https://github.com/akramibm/docker_python_flask-project.git
+              cd docker_python_flask-project
               docker build -t flask-app:latest .
               docker run -d --name flask-app-service -p 5000:5000 --restart unless-stopped flask-app:latest
               USERDATA
@@ -143,57 +112,15 @@ resource "aws_instance" "flask_app_ec2" {
 }
 
 output "public_ip" {
-  value       = aws_instance.flask_app_ec2.public_ip
-  description = "Public IP"
+  value = aws_instance.flask_app_ec2.public_ip
 }
 
 output "app_url" {
-  value       = "http://${aws_instance.flask_app_ec2.public_ip}:5000"
-  description = "Direct Flask URL"
+  value = "http://${aws_instance.flask_app_ec2.public_ip}:5000"
 }
 
 output "nginx_url" {
-  value       = "http://${aws_instance.flask_app_ec2.public_ip}"
-  description = "Nginx Proxy URL"
+  value = "http://${aws_instance.flask_app_ec2.public_ip}"
 }
 '''
         }
-
-        stage('Terraform Action') {
-            dir(tfDir) {
-                sh 'terraform init -input=false'
-
-                if (params.ACTION == 'destroy') {
-                    echo "Destroying EC2 and Security Group infrastructure..."
-                    sh 'terraform destroy -auto-approve -input=false'
-                } else {
-                    echo "Applying infrastructure..."
-                    sh 'terraform apply -auto-approve -input=false'
-                    sh 'terraform output -raw app_url > ../app_url.txt'
-                    sh 'terraform output -raw nginx_url > ../nginx_url.txt'
-                }
-            }
-        }
-
-        stage('Summary') {
-            if (params.ACTION == 'apply') {
-                def appUrl   = readFile('app_url.txt').trim()
-                def nginxUrl = readFile('nginx_url.txt').trim()
-                echo "=========================================================="
-                echo "Deployment Complete!"
-                echo "Flask Direct URL : ${appUrl}"
-                echo "Nginx Proxy URL  : ${nginxUrl}"
-                echo "Note: Wait ~2 minutes for Docker image build to complete."
-                echo "=========================================================="
-            } else {
-                echo "=========================================================="
-                echo "Infrastructure Destroyed Successfully."
-                echo "=========================================================="
-            }
-        }
-
-    } catch (err) {
-        echo "Pipeline failed: ${err.getMessage()}"
-        throw err
-    }
-}
