@@ -14,7 +14,7 @@ node {
         stage('Install Terraform') {
             echo 'Ensuring Terraform CLI is present...'
             sh '''
-                if ! command -v terraform &> /dev/null; then
+                if ! command -v terraform &> /dev/null;  then
                     echo "Installing Terraform CLI..."
                     sudo apt-get update -y && sudo apt-get install -y gnupg software-properties-common curl
                     curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
