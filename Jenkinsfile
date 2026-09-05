@@ -1,33 +1,5 @@
-node {
-    def tfDir      = 'terraform'
-    def gitCredsId = 'token123'
-    def repoUrl    = 'https://github.com/akramibm/docker_python_flask-project.git'
-
-    try {
-        stage('Checkout Code') {
-            echo "Checking out repository..."
-            git branch: 'main',
-                credentialsId: gitCredsId,
-                url: repoUrl
-        }
-
-        stage('Install Terraform') {
-            echo 'Ensuring Terraform CLI is present...'
-            sh '''
-                if ! command -v terraform &> /dev/null; then
-                    echo "Installing Terraform CLI..."
-                    sudo apt-get update -y && sudo apt-get install -y gnupg software-properties-common curl
-                    curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-                    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-                    sudo apt-get update -y && sudo apt-get install -y terraform
-                else
-                    echo "Terraform already installed: $(terraform -version | head -n 1)"
-                fi
-            '''
-        }
-
-        stage('Generate Terraform Config') {
-            echo 'Writing Terraform code attaching terraform_ec2 role...'
+stage('Generate Terraform Config') {
+            echo 'Generating Terraform configuration without IAM read queries...'
             sh """
                 mkdir -p ${tfDir}
                 cat << 'EOF' > ${tfDir}/main.tf
@@ -41,23 +13,11 @@ terraform {
   }
 }
 
-# Automatically authenticates via the Jenkins host EC2 IAM role
 provider "aws" {
   region = "us-east-1"
 }
 
-# 1. Reference your existing IAM role
-data "aws_iam_role" "existing_role" {
-  name = "terraform_ec2"
-}
-
-# 2. Instance profile wrapper for terraform_ec2
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "terraform_ec2_profile"
-  role = data.aws_iam_role.existing_role.name
-}
-
-# 3. Security Group
+# 1. Security Group
 resource "aws_security_group" "flask_ec2_sg" {
   name        = "flask-docker-ec2-sg"
   description = "Security group allowing SSH, HTTP and port 5000"
@@ -94,12 +54,12 @@ resource "aws_security_group" "flask_ec2_sg" {
   }
 }
 
-# 4. EC2 Instance with AMI and IAM profile attached
+# 2. EC2 Instance with AMI and IAM profile directly assigned
 resource "aws_instance" "flask_app_ec2" {
   ami                  = "ami-02b64aa047cb5edf5"
   instance_type        = "t2.micro"
   vpc_security_group_ids = [aws_security_group.flask_ec2_sg.id]
-  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile = "terraform_ec2"
 
   user_data = <<-USERDATA
               #!/bin/bash
@@ -111,16 +71,15 @@ resource "aws_instance" "flask_app_ec2" {
               systemctl enable docker
               usermod -aG docker ubuntu
 
-              # Nginx reverse proxy routing port 80 to 5000
               cat << 'NGINX_CONF' > /etc/nginx/sites-available/default
               server {
                   listen 80;
                   server_name _;
                   location / {
                       proxy_pass http://127.0.0.1:5000;
-                      proxy_set_header Host \$host;
-                      proxy_set_header X-Real-IP \$remote_addr;
-                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                      proxy_set_header Host \\\$host;
+                      proxy_set_header X-Real-IP \\\$remote_addr;
+                      proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
                   }
               }
               NGINX_CONF
@@ -128,7 +87,6 @@ resource "aws_instance" "flask_app_ec2" {
               systemctl restart nginx
               systemctl enable nginx
 
-              # Clone repo and launch detached container
               cd /home/ubuntu
               git clone https://github.com/akramibm/docker_python_flask-project.git
               cd docker_python_flask-project
@@ -155,37 +113,3 @@ output "nginx_url" {
 EOF
             """
         }
-
-        stage('Terraform Init & Apply') {
-            echo 'Initializing and provisioning AWS EC2 using EC2 IAM Role permissions...'
-            dir(tfDir) {
-                sh 'terraform init -input=false'
-                sh 'terraform apply -auto-approve -input=false'
-                sh 'terraform output -raw app_url > ../app_url.txt'
-                sh 'terraform output -raw nginx_url > ../nginx_url.txt'
-            }
-        }
-
-        stage('Deployment Summary') {
-            def appUrl   = readFile('app_url.txt').trim()
-            def nginxUrl = readFile('nginx_url.txt').trim()
-            echo "=========================================================="
-            echo "Deployment Completed Successfully!"
-            echo "Auth Method      : Attached EC2 IAM Role"
-            echo "AMI Used         : ami-02b64aa047cb5edf5"
-            echo "IAM Role Attached: terraform_ec2"
-            echo "Direct Flask URL : ${appUrl}"
-            echo "Nginx Proxy URL  : ${nginxUrl}"
-            echo "=========================================================="
-        }
-
-    } catch (err) {
-        echo "Pipeline run failed: ${err.getMessage()}"
-        throw err
-
-    } finally {
-        stage('Cleanup Local Artifacts') {
-            sh 'rm -f app_url.txt nginx_url.txt'
-        }
-    }
-}
