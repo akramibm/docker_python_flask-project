@@ -1,5 +1,4 @@
 node {
-    // Configuration Variables
     def imageName     = 'flask-app'
     def containerName = 'flask-app-service'
     def hostPort      = '5000'
@@ -9,16 +8,15 @@ node {
 
     try {
         stage('Ensure Docker Running') {
-            echo 'Starting Docker service and setting socket permissions...'
+            echo 'Verifying Docker daemon connectivity...'
             sh '''
-                sudo systemctl start docker || true
-                sudo systemctl enable docker || true
-                sudo chmod 666 /var/run/docker.sock || true
-                
-                # Test connection to Docker daemon
                 docker info > /dev/null 2>&1 || {
-                    echo "ERROR: Cannot talk to Docker daemon after starting service."
-                    exit 1
+                    echo "Docker daemon unreachable. Attempting socket permission adjustment..."
+                    sudo chmod 666 /var/run/docker.sock || true
+                    docker info > /dev/null 2>&1 || {
+                        echo "ERROR: Cannot talk to Docker daemon."
+                        exit 1
+                    }
                 }
             '''
         }
@@ -36,29 +34,26 @@ node {
         }
 
         stage('Run App in Background') {
-            echo 'Cleaning up old container and starting new instance in detached mode...'
+            echo 'Starting container in background (-d)...'
             sh """
-                # Stop and delete existing container if active
                 if [ \$(docker ps -aq -f name=^/${containerName}\$) ]; then
-                    echo "Removing existing container ${containerName}..."
+                    echo "Cleaning up older container ${containerName}..."
                     docker stop ${containerName} || true
                     docker rm -f ${containerName} || true
                 fi
 
-                # Run container in background (-d)
                 docker run -d \\
                     --name ${containerName} \\
                     -p ${hostPort}:${containerPort} \\
                     --restart unless-stopped \\
                     ${imageName}:latest
 
-                # Confirm running status
                 docker ps -f name=^/${containerName}\$
             """
         }
 
         stage('Health Check') {
-            echo 'Verifying background service response...'
+            echo 'Verifying background application responsiveness...'
             sh """
                 sleep 5
                 curl -I -s --retry 5 --retry-delay 2 http://localhost:${hostPort}/ || {
@@ -69,16 +64,15 @@ node {
             """
         }
 
-        echo "Flask container '${containerName}' is successfully running in background on port ${hostPort}."
+        echo "Container '${containerName}' is up and serving traffic on port ${hostPort}."
 
     } catch (err) {
-        echo "Pipeline failed with error: ${err.getMessage()}"
+        echo "Pipeline failed: ${err.getMessage()}"
         sh "docker logs ${containerName} || true"
         throw err
 
     } finally {
         stage('Workspace Cleanup') {
-            echo 'Cleaning Jenkins workspace while keeping background container active...'
             cleanWs()
         }
     }
