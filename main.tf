@@ -1,3 +1,18 @@
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Fetch the latest Ubuntu 22.04 LTS AMI
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -13,15 +28,10 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-data "aws_vpc" "default" {
-  default = true
-}
-
-# Security group opening SSH, HTTP (80 for Nginx), and 5000 (Flask directly)
-resource "aws_security_group" "web_sg" {
-  name        = "flask-nginx-sg"
-  description = "Allow HTTP, Flask port, and SSH inbound"
-  vpc_id      = data.aws_vpc.default.id
+# Security Group: Allow SSH, HTTP (Nginx), and direct Flask port
+resource "aws_security_group" "flask_app_sg" {
+  name        = "flask-app-sg"
+  description = "Security group for Flask Docker deployment with Nginx"
 
   ingress {
     description = "SSH"
@@ -32,7 +42,7 @@ resource "aws_security_group" "web_sg" {
   }
 
   ingress {
-    description = "HTTP Nginx Reverse Proxy"
+    description = "HTTP - Nginx"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -40,7 +50,7 @@ resource "aws_security_group" "web_sg" {
   }
 
   ingress {
-    description = "Direct Flask App Port"
+    description = "Flask direct access"
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
@@ -48,6 +58,7 @@ resource "aws_security_group" "web_sg" {
   }
 
   egress {
+    description = "Outbound internet access"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -55,27 +66,32 @@ resource "aws_security_group" "web_sg" {
   }
 
   tags = {
-    Name = "flask-nginx-sg"
+    Name = "flask-app-sg"
   }
 }
 
+# EC2 Instance
 resource "aws_instance" "flask_server" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.micro"
-  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
 
-  # Cloud-init provisioning: installs Docker & Nginx reverse proxy
+  # Automated setup: installs Docker, Nginx, clones repo, and runs container
   user_data = <<-EOF
               #!/bin/bash
-              apt-get update -y
-              apt-get install -y docker.io nginx curl git
+              set -e
 
+              # 1. Update system and install required packages
+              apt-get update -y
+              apt-get install -y docker.io nginx git curl
+
+              # 2. Start and enable Docker
               systemctl start docker
               systemctl enable docker
               usermod -aG docker ubuntu
 
-              # Configure Nginx reverse proxy to forward port 80 to port 5000
-              cat << 'CONF' > /etc/nginx/sites-available/default
+              # 3. Configure Nginx as reverse proxy to Flask (port 5000)
+              cat << 'NGINX_CONF' > /etc/nginx/sites-available/default
               server {
                   listen 80;
                   server_name _;
@@ -87,13 +103,25 @@ resource "aws_instance" "flask_server" {
                       proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
                   }
               }
-              CONF
+              NGINX_CONF
 
               systemctl restart nginx
               systemctl enable nginx
+
+              # 4. Clone repo, build image, and run container in detached mode
+              cd /home/ubuntu
+              git clone https://github.com/akramibm/docker_python_flask-project.git
+              cd docker_python_flask-project
+
+              docker build -t flask-app:latest .
+              docker run -d \
+                --name flask-app-service \
+                -p 5000:5000 \
+                --restart unless-stopped \
+                flask-app:latest
               EOF
 
   tags = {
-    Name = "flask-docker-nginx-host"
+    Name = "flask-docker-ec2"
   }
 }
