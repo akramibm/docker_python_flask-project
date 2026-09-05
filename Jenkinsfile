@@ -145,8 +145,8 @@ output "nginx_url" {
         stage('Terraform Init & Apply') {
             echo 'Initializing and provisioning AWS EC2 with terraform_ec2 IAM profile...'
             dir(tfDir) {
-                sh 'terraform init -input=false'
-                sh 'terraform apply -auto-approve -input=false'
+                sh 'terraform init '
+                sh 'terraform apply -auto-approve'
                 sh 'terraform output -raw app_url > ../app_url.txt'
                 sh 'terraform output -raw nginx_url > ../nginx_url.txt'
             }
