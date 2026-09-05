@@ -48,6 +48,10 @@ resource "aws_security_group" "flask_ec2_sg" {
   name        = "flask-docker-ec2-sg"
   description = "Allow SSH, HTTP and port 5000"
 
+  lifecycle {
+    create_before_destroy = true
+  }
+
   ingress {
     description = "SSH"
     from_port   = 22
