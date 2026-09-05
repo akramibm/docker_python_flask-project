@@ -21,17 +21,14 @@ node {
                 url: repoUrl
         }
 
-        stage('Install Terraform') {
-            echo 'Verifying Terraform CLI...'
+        stage('Install Tools') {
+            echo 'Verifying Terraform and AWS CLI...'
             sh '''
                 if ! command -v terraform &> /dev/null; then
-                    echo "Installing Terraform CLI..."
                     sudo apt-get update -y && sudo apt-get install -y gnupg software-properties-common curl
                     curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
                     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
                     sudo apt-get update -y && sudo apt-get install -y terraform
-                else
-                    echo "Terraform already installed: $(terraform -version | head -n 1)"
                 fi
             '''
         }
@@ -108,7 +105,7 @@ resource "aws_instance" "flask_app_ec2" {
   user_data = <<-USERDATA
               #!/bin/bash
               exec > /var/log/user-data.log 2>&1
-              set -e
+              set -ex
 
               export DEBIAN_FRONTEND=noninteractive
               sed -i "s/#\\$nrconf{restart} = 'i';/\\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf 2>/dev/null || true
@@ -137,9 +134,9 @@ resource "aws_instance" "flask_app_ec2" {
               systemctl enable nginx
 
               cd /home/ubuntu
-              rm -rf docker_python_flask-project
-              git clone https://github.com/akramibm/docker_python_flask-project.git
-              cd docker_python_flask-project
+              rm -rf app
+              git clone https://github.com/akramibm/docker_python_flask-project.git app
+              cd app
               docker build -t flask-app:latest .
               docker run -d --name flask-app-service -p 5000:5000 --restart unless-stopped flask-app:latest
               USERDATA
@@ -147,6 +144,10 @@ resource "aws_instance" "flask_app_ec2" {
   tags = {
     Name = "flask-app-production-ec2"
   }
+}
+
+output "instance_id" {
+  value = aws_instance.flask_app_ec2.id
 }
 
 output "public_ip" {
@@ -175,7 +176,37 @@ output "nginx_url" {
                     sh 'terraform apply -auto-approve -input=false'
                     sh 'terraform output -raw app_url > ../app_url.txt'
                     sh 'terraform output -raw nginx_url > ../nginx_url.txt'
+                    sh 'terraform output -raw instance_id > ../instance_id.txt'
+                    sh 'terraform output -raw public_ip > ../public_ip.txt'
                 }
+            }
+        }
+
+        stage('Wait & Verify Application') {
+            if (params.ACTION != 'destroy') {
+                def targetIp   = readFile('public_ip.txt').trim()
+                def instanceId = readFile('instance_id.txt').trim()
+                echo "Polling http://${targetIp}:5000 until the container boots up..."
+
+                sh """
+                    READY=0
+                    for i in {1..30}; do
+                        echo "Attempt \$i/30: Checking if app is responding..."
+                        if curl -s -f -m 5 "http://${targetIp}:5000" > /dev/null || curl -s -f -m 5 "http://${targetIp}" > /dev/null; then
+                            echo "Application is UP and serving traffic!"
+                            READY=1
+                            break
+                        fi
+                        sleep 10
+                    done
+
+                    if [ \$READY -eq 0 ]; then
+                        echo "ERROR: Application failed to start within 5 minutes."
+                        echo "Fetching EC2 System Console Log to diagnose failure without SSH:"
+                        aws ec2 get-console-output --instance-id "${instanceId}" --region us-east-1 --output text || true
+                        exit 1
+                    fi
+                """
             }
         }
 
@@ -184,15 +215,12 @@ output "nginx_url" {
                 def appUrl   = readFile('app_url.txt').trim()
                 def nginxUrl = readFile('nginx_url.txt').trim()
                 echo "=========================================================="
-                echo "Deployment Succeeded!"
-                echo "Flask Direct URL : ${appUrl}"
+                echo "Deployment Verified & Running!"
+                echo "Direct Flask URL : ${appUrl}"
                 echo "Nginx Proxy URL  : ${nginxUrl}"
-                echo "Note: Wait ~90-120s for Docker build and startup."
                 echo "=========================================================="
             } else {
-                echo "=========================================================="
-                echo "Infrastructure destroyed successfully."
-                echo "=========================================================="
+                echo "Infrastructure destroyed."
             }
         }
 
@@ -202,7 +230,7 @@ output "nginx_url" {
 
     } finally {
         stage('Cleanup Local Artifacts') {
-            sh 'rm -f app_url.txt nginx_url.txt'
+            sh 'rm -f app_url.txt nginx_url.txt instance_id.txt public_ip.txt'
         }
     }
 }
